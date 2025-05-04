@@ -1,2 +1,4 @@
-.txt
-_cpu
+jacobi3d_cpu 
+jacobi3d_gpu 
+cpu_time.txt
+gpu_time.txt
