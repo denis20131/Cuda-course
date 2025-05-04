@@ -6,7 +6,7 @@
 #include <chrono>
 
 // Конфигурация выполнения
-#define BLOCK_SIZE 4
+#define BLOCK_SIZE 8
 
 // Атомарный максимум для float
 __device__ float atomicMaxFloat(float* address, float val) {
@@ -53,16 +53,31 @@ __global__ void update_kernel(real* A, real* B, float* d_eps, int L) {
 }
 
 __global__ void compute_kernel(real* A, real* B, int L) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-    int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
-    int k = blockIdx.z * blockDim.z + threadIdx.z + 1;
+    __shared__ real tile[BLOCK_SIZE+2][BLOCK_SIZE+2][BLOCK_SIZE+2]; // +2 для halo
+    
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int k = blockIdx.z * blockDim.z + threadIdx.z;
+    
+    // Загрузка блока в shared memory (с halo)
+    if(i >= 1 && i <= L-2 && j >= 1 && j <= L-2 && k >= 1 && k <= L-2) {
+        tile[threadIdx.x][threadIdx.y][threadIdx.z] = A[IDX(i,j,k,L)];
+        
+        // Загрузка halo-областей
+        if(threadIdx.x == 0) tile[threadIdx.x-1][threadIdx.y][threadIdx.z] = A[IDX(i-1,j,k,L)];
+        if(threadIdx.x == blockDim.x-1) tile[threadIdx.x+1][threadIdx.y][threadIdx.z] = A[IDX(i+1,j,k,L)];
+        // ... аналогично для y и z
+    }
+    __syncthreads();
 
-    if (i >= L - 1 || j >= L - 1 || k >= L - 1) return;
-
-    int idx = IDX(i, j, k, L);
-    B[idx] = (A[IDX(i-1,j,k,L)] + A[IDX(i+1,j,k,L)] +
-              A[IDX(i,j-1,k,L)] + A[IDX(i,j+1,k,L)] +
-              A[IDX(i,j,k-1,L)] + A[IDX(i,j,k+1,L)]) * (1.0f/6.0f);
+    if(i >= 1 && i <= L-2 && j >= 1 && j <= L-2 && k >= 1 && k <= L-2) {
+        B[IDX(i,j,k,L)] = (tile[threadIdx.x-1][threadIdx.y][threadIdx.z] +
+                          tile[threadIdx.x+1][threadIdx.y][threadIdx.z] +
+                          tile[threadIdx.x][threadIdx.y-1][threadIdx.z] +
+                          tile[threadIdx.x][threadIdx.y+1][threadIdx.z] +
+                          tile[threadIdx.x][threadIdx.y][threadIdx.z-1] +
+                          tile[threadIdx.x][threadIdx.y][threadIdx.z+1]) * (1.0f/6.0f);
+    }
 }
 
 void print_gpu_info() {
