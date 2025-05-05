@@ -1,16 +1,12 @@
-#include <stdio.h>
-#include <stdlib.h>
+#include "common.hpp"
 #include <cuda_runtime.h>
 #include <omp.h>
 #include <chrono>
 
 #define BLOCK_SIZE 8
-#define MAX_ITER 20
 #define MAX_GPUS 2
 
-typedef float real;
-
-#define IDX(i,j,k,L) ((i)*(L)*(L) + (j)*(L) + (k))
+// Используем IDX и real из common.hpp
 
 __device__ float atomicMaxFloat(float* address, float val) {
     int* addr_as_int = (int*)address;
@@ -54,14 +50,15 @@ __global__ void jacobi_kernel(real* A, real* B, float* d_eps, int L, int z_start
     B[idx] = new_val;
 }
 
-void print_memory_info(int dev) {
+void print_gpu_info(int dev) {
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, dev);
     
     size_t free, total;
     cudaMemGetInfo(&free, &total);
     
-    printf("GPU %d: %s\n", dev, prop.name);
+    printf("GPU %d: %s (Compute Capability %d.%d)\n", 
+           dev, prop.name, prop.major, prop.minor);
     printf("  Total memory: %.2f MB\n", total/1024.0/1024.0);
     printf("  Free memory:  %.2f MB\n", free/1024.0/1024.0);
     printf("  Used memory:  %.2f MB\n", (total-free)/1024.0/1024.0);
@@ -73,34 +70,33 @@ void initialize_data(real* h_A, real* h_B, int L) {
         for (int j = 0; j < L; j++) {
             for (int k = 0; k < L; k++) {
                 int idx = IDX(i,j,k,L);
-                h_A[idx] = 0.0f;
+                h_A[idx] = 0.0;
                 if (i == 0 || j == 0 || k == 0 || i == L-1 || j == L-1 || k == L-1) {
-                    h_B[idx] = 0.0f;
+                    h_B[idx] = 0.0;
                 } else {
-                    h_B[idx] = (float)(i + j + k);
+                    h_B[idx] = (real)(i + j + k);
                 }
             }
         }
     }
 }
 
-void run_on_gpu(int dev, real* d_A, real* d_B, float* d_eps, int L) {
+void run_on_gpu(int dev, real* d_A, real* d_B, float* d_eps, int L, int ITMAX) {
     cudaSetDevice(dev);
     
     int z_size = (L-2 + MAX_GPUS - 1) / MAX_GPUS;
     int z_start = dev * z_size;
-    int z_end = min(z_start + z_size, L-2);
+    int z_end = MIN(z_start + z_size, L-2);
     
     dim3 block(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
     dim3 grid((L-2 + block.x-1)/block.x,
               (L-2 + block.y-1)/block.y,
               (z_end - z_start + block.z-1)/block.z);
 
-    // Выводим информацию о памяти перед выполнением
-    printf("\nMemory usage before computation (GPU %d):\n", dev);
-    print_memory_info(dev);
+    printf("\nGPU %d: Processing z = %d to %d\n", dev, z_start+1, z_end);
+    print_gpu_info(dev);
 
-    for (int iter = 0; iter < MAX_ITER; iter++) {
+    for (int iter = 0; iter < ITMAX; iter++) {
         float zero = 0.0f;
         cudaMemcpy(d_eps, &zero, sizeof(float), cudaMemcpyHostToDevice);
         
@@ -114,24 +110,35 @@ void run_on_gpu(int dev, real* d_A, real* d_B, float* d_eps, int L) {
         float eps;
         cudaMemcpy(&eps, d_eps, sizeof(float), cudaMemcpyDeviceToHost);
         printf("GPU %d Iter %2d EPS = %.3e\n", dev, iter+1, eps);
+        
+        if (eps < EPSILON) {
+            printf("GPU %d converged at iteration %d\n", dev, iter+1);
+            break;
+        }
     }
-
-    // Выводим информацию о памяти после выполнения
-    printf("\nMemory usage after computation (GPU %d):\n", dev);
-    print_memory_info(dev);
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        printf("Usage: %s <grid_size>\n", argv[0]);
+    if (argc < 3) {
+        printf("Usage: %s <grid_size> <max_iterations> [use_float=1]\n", argv[0]);
         return 1;
     }
 
     const int L = atoi(argv[1]);
+    const int ITMAX = atoi(argv[2]);
+    const int use_float = (argc > 3) ? atoi(argv[3]) : 1;
+    
+    #ifdef USE_FLOAT
+    printf("Using single precision (float)\n");
+    #else
+    printf("Using double precision (double)\n");
+    #endif
+
     const size_t mem_size = L*L*L*sizeof(real);
     const size_t eps_size = sizeof(float);
     
-    printf("Problem size: %dx%dx%d\n", L, L, L);
+    printf("\nProblem size: %dx%dx%d\n", L, L, L);
+    printf("Max iterations: %d\n", ITMAX);
     printf("Memory per array: %.2f MB\n", mem_size/1024.0/1024.0);
     printf("Total GPU memory required: %.2f MB (per GPU)\n", 
           (2*mem_size + eps_size)/1024.0/1024.0);
@@ -141,13 +148,6 @@ int main(int argc, char** argv) {
     if (num_devices < MAX_GPUS) {
         printf("Error: Need at least %d GPUs (found %d)\n", MAX_GPUS, num_devices);
         return 1;
-    }
-
-    // Выводим информацию о доступных GPU
-    for (int dev = 0; dev < MAX_GPUS; dev++) {
-        cudaSetDevice(dev);
-        printf("\nGPU %d properties:\n", dev);
-        print_memory_info(dev);
     }
 
     // Инициализация данных
@@ -174,7 +174,7 @@ int main(int argc, char** argv) {
     
     #pragma omp parallel for num_threads(MAX_GPUS)
     for (int dev = 0; dev < MAX_GPUS; dev++) {
-        run_on_gpu(dev, d_A[dev], d_B[dev], d_eps[dev], L);
+        run_on_gpu(dev, d_A[dev], d_B[dev], d_eps[dev], L, ITMAX);
     }
     
     auto end = std::chrono::high_resolution_clock::now();

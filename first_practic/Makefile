@@ -68,15 +68,3 @@ run: run_cpu run_gpu
 	@echo "----------------------------"
 	@CPU_TIME=$$(grep 'Time in seconds' $(CPU_TIME_FILE) | awk '{print $$5}'); \
 	GPU_TIME=$$(grep 'Time in seconds' $(GPU_TIME_FILE) | awk '{print $$5}'); \
-	if [ -z "$$CPU_TIME" ] || [ -z "$$GPU_TIME" ]; then \
-		echo "Ошибка: не удалось извлечь время выполнения."; \
-		echo "Содержимое $(CPU_TIME_FILE):"; cat $(CPU_TIME_FILE); \
-		echo "Содержимое $(GPU_TIME_FILE):"; cat $(GPU_TIME_FILE); \
-	else \
-		SPEEDUP=$$(echo "$$CPU_TIME / $$GPU_TIME" | bc -l); \
-		printf "CPU время: %20.2f сек\n" $$CPU_TIME; \
-		printf "GPU время: %20.2f сек\n" $$GPU_TIME; \
-		printf "Ускорение (speedup): %16.2f раз\n" $$SPEEDUP; \
-	fi
-	@echo "----------------------------"
-	@echo "Тестирование завершено"
