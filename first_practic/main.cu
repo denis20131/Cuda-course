@@ -92,7 +92,6 @@ void run_on_gpu(int dev, real* d_A, real* d_B, float* d_eps, int L,int MAX_IT,co
               (L-2 + block.y-1)/block.y,
               (z_end - z_start + block.z-1)/block.z);
 
-    // Выводим информацию о памяти перед выполнением
     printf("\nMemory usage before computation (GPU %d):\n", dev);
     print_memory_info(dev);
 
@@ -114,7 +113,6 @@ void run_on_gpu(int dev, real* d_A, real* d_B, float* d_eps, int L,int MAX_IT,co
         if (eps < MAXEPS) break;
     }
 
-    // Выводим информацию о памяти после выполнения
     printf("\nMemory usage after computation (GPU %d):\n", dev);
     print_memory_info(dev);
 }
@@ -142,19 +140,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Выводим информацию о доступных GPU
     for (int dev = 0; dev < MAX_GPUS; dev++) {
         cudaSetDevice(dev);
         printf("\nGPU %d properties:\n", dev);
         print_memory_info(dev);
     }
 
-    // Инициализация данных
     real *h_A = (real*)malloc(mem_size);
     real *h_B = (real*)malloc(mem_size);
     initialize_data(h_A, h_B, L);
 
-    // Выделение памяти на устройствах
     real *d_A[MAX_GPUS], *d_B[MAX_GPUS];
     float *d_eps[MAX_GPUS];
     
@@ -168,7 +163,6 @@ int main(int argc, char** argv) {
         cudaMemcpy(d_B[dev], h_B, mem_size, cudaMemcpyHostToDevice);
     }
 
-    // Запуск
     auto start = std::chrono::high_resolution_clock::now();
     
     #pragma omp parallel for num_threads(MAX_GPUS)
@@ -180,7 +174,6 @@ int main(int argc, char** argv) {
     double time = std::chrono::duration<double>(end-start).count();
     printf("\nTotal computation time: %.3f seconds\n", time);
 
-    // Освобождение памяти
     free(h_A);
     free(h_B);
     for (int dev = 0; dev < MAX_GPUS; dev++) {
