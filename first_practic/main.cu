@@ -1,14 +1,17 @@
-#define USE_FLOAT
-#include "common.hpp"
+#include <stdio.h>
+#include <stdlib.h>
 #include <cuda_runtime.h>
-#include <iostream>
-#include <vector>
+#include <omp.h>
 #include <chrono>
 
-// Конфигурация выполнения
 #define BLOCK_SIZE 8
+#define MAX_ITER 20
+#define MAX_GPUS 2
 
-// Атомарный максимум для float
+typedef float real;
+
+#define IDX(i,j,k,L) ((i)*(L)*(L) + (j)*(L) + (k))
+
 __device__ float atomicMaxFloat(float* address, float val) {
     int* addr_as_int = (int*)address;
     int old = *addr_as_int;
@@ -16,175 +19,177 @@ __device__ float atomicMaxFloat(float* address, float val) {
     do {
         assumed = old;
         old = atomicCAS(addr_as_int, assumed,
-                       __float_as_int(fmaxf(val, __int_as_float(assumed))));
+                      __float_as_int(fmaxf(val, __int_as_float(assumed))));
     } while (assumed != old);
     return __int_as_float(old);
 }
 
-__global__ void update_kernel(real* A, real* B, float* d_eps, int L) {
+__global__ void jacobi_kernel(real* A, real* B, float* d_eps, int L, int z_start, int z_end) {
     int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
-    int k = blockIdx.z * blockDim.z + threadIdx.z + 1;
+    int k = blockIdx.z * blockDim.z + threadIdx.z + z_start + 1;
 
-    if (i >= L - 1 || j >= L - 1 || k >= L - 1) return;
+    if (i >= L-1 || j >= L-1 || k >= z_end) return;
 
-    int idx = IDX(i, j, k, L);
-    float diff = fabsf(B[idx] - A[idx]);
+    int idx = IDX(i,j,k,L);
+    real new_val = (A[IDX(i-1,j,k,L)] + A[IDX(i+1,j,k,L)] +
+                   A[IDX(i,j-1,k,L)] + A[IDX(i,j+1,k,L)] +
+                   A[IDX(i,j,k-1,L)] + A[IDX(i,j,k+1,L)]) * (1.0f/6.0f);
     
-    // Редукция внутри блока через shared memory
-    __shared__ float shared_max[BLOCK_SIZE*BLOCK_SIZE*BLOCK_SIZE];
-    int tid = threadIdx.x + threadIdx.y*blockDim.x + threadIdx.z*blockDim.x*blockDim.y;
-    shared_max[tid] = diff;
-    __syncthreads();
-
-    for (int s = blockDim.x*blockDim.y*blockDim.z/2; s > 0; s >>= 1) {
-        if (tid < s) {
-            shared_max[tid] = fmaxf(shared_max[tid], shared_max[tid + s]);
-        }
-        __syncthreads();
-    }
-
-    // Атомарное обновление глобального максимума
-    if (tid == 0) {
-        atomicMaxFloat(d_eps, shared_max[0]);
-    }
+    float diff = fabsf(new_val - A[idx]);
     
-    A[idx] = B[idx];
-}
-
-__global__ void compute_kernel(real* A, real* B, int L) {
-    __shared__ real tile[BLOCK_SIZE+2][BLOCK_SIZE+2][BLOCK_SIZE+2]; // +2 для halo
-    
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int j = blockIdx.y * blockDim.y + threadIdx.y;
-    int k = blockIdx.z * blockDim.z + threadIdx.z;
-    
-    // Загрузка блока в shared memory (с halo)
-    if(i >= 1 && i <= L-2 && j >= 1 && j <= L-2 && k >= 1 && k <= L-2) {
-        tile[threadIdx.x][threadIdx.y][threadIdx.z] = A[IDX(i,j,k,L)];
-        
-        // Загрузка halo-областей
-        if(threadIdx.x == 0) tile[threadIdx.x-1][threadIdx.y][threadIdx.z] = A[IDX(i-1,j,k,L)];
-        if(threadIdx.x == blockDim.x-1) tile[threadIdx.x+1][threadIdx.y][threadIdx.z] = A[IDX(i+1,j,k,L)];
-        // ... аналогично для y и z
+    __shared__ float block_max;
+    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
+        block_max = 0.0f;
     }
     __syncthreads();
 
-    if(i >= 1 && i <= L-2 && j >= 1 && j <= L-2 && k >= 1 && k <= L-2) {
-        B[IDX(i,j,k,L)] = (tile[threadIdx.x-1][threadIdx.y][threadIdx.z] +
-                          tile[threadIdx.x+1][threadIdx.y][threadIdx.z] +
-                          tile[threadIdx.x][threadIdx.y-1][threadIdx.z] +
-                          tile[threadIdx.x][threadIdx.y+1][threadIdx.z] +
-                          tile[threadIdx.x][threadIdx.y][threadIdx.z-1] +
-                          tile[threadIdx.x][threadIdx.y][threadIdx.z+1]) * (1.0f/6.0f);
+    atomicMaxFloat(&block_max, diff);
+    __syncthreads();
+
+    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
+        atomicMaxFloat(d_eps, block_max);
     }
+    
+    B[idx] = new_val;
 }
 
-void print_gpu_info() {
+void print_memory_info(int dev) {
     cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
-    printf("GPU: %s (Compute Capability %d.%d)\n", prop.name, prop.major, prop.minor);
+    cudaGetDeviceProperties(&prop, dev);
     
     size_t free, total;
     cudaMemGetInfo(&free, &total);
-    printf("GPU Memory: %.1f GB (%.1f GB free)\n", 
-           total/1024.0/1024.0/1024.0, 
-           free/1024.0/1024.0/1024.0);
+    
+    printf("GPU %d: %s\n", dev, prop.name);
+    printf("  Total memory: %.2f MB\n", total/1024.0/1024.0);
+    printf("  Free memory:  %.2f MB\n", free/1024.0/1024.0);
+    printf("  Used memory:  %.2f MB\n", (total-free)/1024.0/1024.0);
+}
+
+void initialize_data(real* h_A, real* h_B, int L) {
+    #pragma omp parallel for collapse(3)
+    for (int i = 0; i < L; i++) {
+        for (int j = 0; j < L; j++) {
+            for (int k = 0; k < L; k++) {
+                int idx = IDX(i,j,k,L);
+                h_A[idx] = 0.0f;
+                if (i == 0 || j == 0 || k == 0 || i == L-1 || j == L-1 || k == L-1) {
+                    h_B[idx] = 0.0f;
+                } else {
+                    h_B[idx] = (float)(i + j + k);
+                }
+            }
+        }
+    }
+}
+
+void run_on_gpu(int dev, real* d_A, real* d_B, float* d_eps, int L) {
+    cudaSetDevice(dev);
+    
+    int z_size = (L-2 + MAX_GPUS - 1) / MAX_GPUS;
+    int z_start = dev * z_size;
+    int z_end = min(z_start + z_size, L-2);
+    
+    dim3 block(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+    dim3 grid((L-2 + block.x-1)/block.x,
+              (L-2 + block.y-1)/block.y,
+              (z_end - z_start + block.z-1)/block.z);
+
+    // Выводим информацию о памяти перед выполнением
+    printf("\nMemory usage before computation (GPU %d):\n", dev);
+    print_memory_info(dev);
+
+    for (int iter = 0; iter < MAX_ITER; iter++) {
+        float zero = 0.0f;
+        cudaMemcpy(d_eps, &zero, sizeof(float), cudaMemcpyHostToDevice);
+        
+        jacobi_kernel<<<grid, block>>>(d_A, d_B, d_eps, L, z_start, z_end);
+        cudaDeviceSynchronize();
+        
+        real* temp = d_A;
+        d_A = d_B;
+        d_B = temp;
+        
+        float eps;
+        cudaMemcpy(&eps, d_eps, sizeof(float), cudaMemcpyDeviceToHost);
+        printf("GPU %d Iter %2d EPS = %.3e\n", dev, iter+1, eps);
+    }
+
+    // Выводим информацию о памяти после выполнения
+    printf("\nMemory usage after computation (GPU %d):\n", dev);
+    print_memory_info(dev);
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) {
-        printf("Usage: %s L ITMAX [MAXEPS=0.5]\n", argv[0]);
+    if (argc < 2) {
+        printf("Usage: %s <grid_size>\n", argv[0]);
         return 1;
     }
 
     const int L = atoi(argv[1]);
-    const int ITMAX = atoi(argv[2]);
-    const float MAXEPS = (argc > 3) ? atof(argv[3]) : 0.5f;
-    const size_t size = L * L * L * sizeof(real);
+    const size_t mem_size = L*L*L*sizeof(real);
+    const size_t eps_size = sizeof(float);
+    
+    printf("Problem size: %dx%dx%d\n", L, L, L);
+    printf("Memory per array: %.2f MB\n", mem_size/1024.0/1024.0);
+    printf("Total GPU memory required: %.2f MB (per GPU)\n", 
+          (2*mem_size + eps_size)/1024.0/1024.0);
 
-    print_gpu_info();
-
-    // Проверка памяти
-    size_t free_mem, total_mem;
-    cudaMemGetInfo(&free_mem, &total_mem);
-    if (size * 2 > free_mem) {
-        printf("Error: Not enough GPU memory! Required %.1f GB, available %.1f GB\n",
-               size*2/1024.0/1024.0/1024.0, free_mem/1024.0/1024.0/1024.0);
+    int num_devices;
+    cudaGetDeviceCount(&num_devices);
+    if (num_devices < MAX_GPUS) {
+        printf("Error: Need at least %d GPUs (found %d)\n", MAX_GPUS, num_devices);
         return 1;
     }
 
-    // Выделение памяти
-    real *d_A, *d_B;
-    float *d_eps;
-    cudaMalloc(&d_A, size);
-    cudaMalloc(&d_B, size);
-    cudaMalloc(&d_eps, sizeof(float));
-
-    // Инициализация
-    std::vector<real> h_A(L*L*L), h_B(L*L*L);
-    for (int i = 0; i < L; ++i) {
-        for (int j = 0; j < L; ++j) {
-            for (int k = 0; k < L; ++k) {
-                int idx = IDX(i,j,k,L);
-                h_A[idx] = 0;
-                h_B[idx] = (i==0 || j==0 || k==0 || i==L-1 || j==L-1 || k==L-1) ? 0 : 4+i+j+k;
-            }
-        }
+    // Выводим информацию о доступных GPU
+    for (int dev = 0; dev < MAX_GPUS; dev++) {
+        cudaSetDevice(dev);
+        printf("\nGPU %d properties:\n", dev);
+        print_memory_info(dev);
     }
-    cudaMemcpy(d_A, h_A.data(), size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_B, h_B.data(), size, cudaMemcpyHostToDevice);
 
-    // Настройка выполнения
-    dim3 block(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
-    dim3 grid((L-2 + block.x-1)/block.x, 
-              (L-2 + block.y-1)/block.y,
-              (L-2 + block.z-1)/block.z);
+    // Инициализация данных
+    real *h_A = (real*)malloc(mem_size);
+    real *h_B = (real*)malloc(mem_size);
+    initialize_data(h_A, h_B, L);
 
-    // Измерение времени
+    // Выделение памяти на устройствах
+    real *d_A[MAX_GPUS], *d_B[MAX_GPUS];
+    float *d_eps[MAX_GPUS];
+    
+    for (int dev = 0; dev < MAX_GPUS; dev++) {
+        cudaSetDevice(dev);
+        cudaMalloc(&d_A[dev], mem_size);
+        cudaMalloc(&d_B[dev], mem_size);
+        cudaMalloc(&d_eps[dev], eps_size);
+        
+        cudaMemcpy(d_A[dev], h_A, mem_size, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_B[dev], h_B, mem_size, cudaMemcpyHostToDevice);
+    }
+
+    // Запуск
     auto start = std::chrono::high_resolution_clock::now();
-    cudaEvent_t gpu_start, gpu_stop;
-    cudaEventCreate(&gpu_start);
-    cudaEventCreate(&gpu_stop);
-    cudaEventRecord(gpu_start);
-
-    // Основной цикл
-    int it_done = 0;
-    for (int it = 0; it < ITMAX; ++it) {
-        float zero = 0.0f;
-        cudaMemcpy(d_eps, &zero, sizeof(float), cudaMemcpyHostToDevice);
-
-        update_kernel<<<grid, block>>>(d_A, d_B, d_eps, L);
-        compute_kernel<<<grid, block>>>(d_A, d_B, L);
-        cudaDeviceSynchronize();
-
-        float eps;
-        cudaMemcpy(&eps, d_eps, sizeof(float), cudaMemcpyDeviceToHost);
-        printf("IT = %4d EPS = %14.7E\n", it+1, eps);
-
-        if (eps < MAXEPS) {
-            it_done = it+1;
-            break;
-        }
+    
+    #pragma omp parallel for num_threads(MAX_GPUS)
+    for (int dev = 0; dev < MAX_GPUS; dev++) {
+        run_on_gpu(dev, d_A[dev], d_B[dev], d_eps[dev], L);
     }
-    it_done = (it_done == 0) ? ITMAX : it_done;
-
-    // Замер времени
-    cudaEventRecord(gpu_stop);
-    cudaEventSynchronize(gpu_stop);
-    float gpu_ms;
-    cudaEventElapsedTime(&gpu_ms, gpu_start, gpu_stop);
+    
     auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end - start;
+    double time = std::chrono::duration<double>(end-start).count();
+    printf("\nTotal computation time: %.3f seconds\n", time);
 
-    // Результаты
-    printf("\nJacobi3D Benchmark Results\n");
-    printf(" Grid Size:      %4d x %4d x %4d\n", L, L, L);
-    printf(" Iterations:     %20d\n", it_done);
-    printf(" GPU Time:       %20.2f sec\n", gpu_ms/1000.0f);
-    printf(" Performance:    %20.2f iters/sec\n", it_done/(gpu_ms/1000.0f));
-    printf(" Memory Used:    %20.1f MB\n", size*2/1024.0/1024.0);
-
+    // Освобождение памяти
+    free(h_A);
+    free(h_B);
+    for (int dev = 0; dev < MAX_GPUS; dev++) {
+        cudaSetDevice(dev);
+        cudaFree(d_A[dev]);
+        cudaFree(d_B[dev]);
+        cudaFree(d_eps[dev]);
+    }
 
     return 0;
 }
