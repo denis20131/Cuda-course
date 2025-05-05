@@ -6,7 +6,8 @@
 #define BLOCK_SIZE 8
 #define MAX_GPUS 2
 
-// Используем IDX и real из common.hpp
+// Добавляем недостающие определения
+
 
 __device__ float atomicMaxFloat(float* address, float val) {
     int* addr_as_int = (int*)address;
@@ -120,33 +121,33 @@ void run_on_gpu(int dev, real* d_A, real* d_B, float* d_eps, int L, int ITMAX) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        printf("Usage: %s <grid_size> <max_iterations> [use_float=1]\n", argv[0]);
+        printf("Usage: %s <L> <ITMAX>\n", argv[0]);
+        printf("Example: %s 900 20\n", argv[0]);
         return 1;
     }
 
     const int L = atoi(argv[1]);
     const int ITMAX = atoi(argv[2]);
-    const int use_float = (argc > 3) ? atoi(argv[3]) : 1;
     
     #ifdef USE_FLOAT
-    printf("Using single precision (float)\n");
+    printf("\nUsing single precision (float)\n");
     #else
-    printf("Using double precision (double)\n");
+    printf("\nUsing double precision (double)\n");
     #endif
 
     const size_t mem_size = L*L*L*sizeof(real);
-    const size_t eps_size = sizeof(float);
     
-    printf("\nProblem size: %dx%dx%d\n", L, L, L);
-    printf("Max iterations: %d\n", ITMAX);
-    printf("Memory per array: %.2f MB\n", mem_size/1024.0/1024.0);
-    printf("Total GPU memory required: %.2f MB (per GPU)\n", 
-          (2*mem_size + eps_size)/1024.0/1024.0);
+    printf("\nProblem parameters:\n");
+    printf("  Grid size (L): %d\n", L);
+    printf("  Max iterations: %d\n", ITMAX);
+    printf("  Memory per array: %.2f MB\n", mem_size/1024.0/1024.0);
+    printf("  Total GPU memory required: %.2f MB (per GPU)\n", 
+          (2*mem_size + sizeof(float))/1024.0/1024.0);
 
     int num_devices;
     cudaGetDeviceCount(&num_devices);
     if (num_devices < MAX_GPUS) {
-        printf("Error: Need at least %d GPUs (found %d)\n", MAX_GPUS, num_devices);
+        printf("\nError: Need at least %d GPUs (found %d)\n", MAX_GPUS, num_devices);
         return 1;
     }
 
@@ -163,7 +164,7 @@ int main(int argc, char** argv) {
         cudaSetDevice(dev);
         cudaMalloc(&d_A[dev], mem_size);
         cudaMalloc(&d_B[dev], mem_size);
-        cudaMalloc(&d_eps[dev], eps_size);
+        cudaMalloc(&d_eps[dev], sizeof(float));
         
         cudaMemcpy(d_A[dev], h_A, mem_size, cudaMemcpyHostToDevice);
         cudaMemcpy(d_B[dev], h_B, mem_size, cudaMemcpyHostToDevice);
