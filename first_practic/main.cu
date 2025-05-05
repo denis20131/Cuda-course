@@ -111,7 +111,6 @@ void run_on_gpu(int dev, real* d_A, real* d_B, float* d_eps, int L,int MAX_IT,co
         cudaMemcpy(&eps, d_eps, sizeof(float), cudaMemcpyDeviceToHost);
 	if (iter==0) continue;
         printf("GPU %d Iter %2d EPS = %.3e\n", dev, iter+1, eps);
-        printf("GPU %d Iter %2d EPS = %.3e\n", dev, iter+1, eps);
         if (eps < MAXEPS) break;
     }
 
