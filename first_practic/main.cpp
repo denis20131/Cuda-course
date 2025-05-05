@@ -1,24 +1,21 @@
 #include "common.hpp"
 #include <omp.h>
 #include <vector>
-#include <cstdlib> // для atoi
+#include <cstdlib> 
 
 int main(int argc, char** argv) {
-    // Проверка аргументов командной строки
     if (argc < 3) {
         printf("Usage: %s L ITMAX\n", argv[0]);
         return 1;
     }
 
-    // Инициализация параметров
-    const int L = atoi(argv[1]);          // Размер сетки
-    const int ITMAX = atoi(argv[2]);      // Макс. число итераций
+    const int L = atoi(argv[1]);          
+    const int ITMAX = atoi(argv[2]);    
     double MAXEPS = 0.5f;
 
     std::vector<real> A(L * L * L, 0), B(L * L * L, 0);
     real eps;
 
-    // Инициализация
     #pragma omp parallel for collapse(3)
     for (int i = 0; i < L; ++i)
         for (int j = 0; j < L; ++j)
@@ -59,7 +56,6 @@ int main(int argc, char** argv) {
         if (eps < MAXEPS)
             break;
     }
-
     double end = omp_get_wtime();
     printf(" Jacobi3D Benchmark Completed.\n");
     printf(" Size            = %4d x %4d x %4d\n", L, L, L);

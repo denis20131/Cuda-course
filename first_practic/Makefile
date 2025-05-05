@@ -14,7 +14,6 @@ EXEC_GPU = jacobi3d_gpu
 L ?= 900
 ITMAX ?= 20
 
-
 # Временные файлы для хранения результатов
 CPU_TIME_FILE = cpu_time.txt
 GPU_TIME_FILE = gpu_time.txt
@@ -43,7 +42,7 @@ clean:
 run_cpu: $(EXEC_CPU)
 	@echo "Запуск CPU версии..."
 	@if [ -x "$(EXEC_CPU)" ]; then \
-		./$(EXEC_CPU) $(L) $(ITMAX)  > $(CPU_TIME_FILE); \
+		./$(EXEC_CPU) $(L) $(ITMAX) > $(CPU_TIME_FILE); \
 		echo "CPU версия завершена."; \
 	else \
 		echo "Ошибка: $(EXEC_CPU) не существует или не является исполняемым файлом."; \
@@ -54,7 +53,7 @@ run_cpu: $(EXEC_CPU)
 run_gpu: $(EXEC_GPU)
 	@echo "Запуск GPU версии..."
 	@if [ -x "$(EXEC_GPU)" ]; then \
-		./$(EXEC_GPU) $(L) $(ITMAX)  > $(GPU_TIME_FILE); \
+		./$(EXEC_GPU) $(L) $(ITMAX) > $(GPU_TIME_FILE); \
 		echo "GPU версия завершена."; \
 	else \
 		echo "Ошибка: $(EXEC_GPU) не существует или не является исполняемым файлом."; \
@@ -66,5 +65,17 @@ run: run_cpu run_gpu
 	@echo ""
 	@echo "Сравнение производительности:"
 	@echo "----------------------------"
+	@echo "CPU результаты:"
+	@cat $(CPU_TIME_FILE)
+	@echo ""
+	@echo "GPU результаты:"
+	@cat $(GPU_TIME_FILE)
+	@echo ""
 	@CPU_TIME=$$(grep 'Time in seconds' $(CPU_TIME_FILE) | awk '{print $$5}'); \
-	GPU_TIME=$$(grep 'Time in seconds' $(GPU_TIME_FILE) | awk '{print $$5}'); \
+	GPU_TIME=$$(grep 'Total computation time' $(GPU_TIME_FILE) | awk '{print $$4}'); \
+	if [ -n "$$CPU_TIME" ] && [ -n "$$GPU_TIME" ]; then \
+		RATIO=$$(echo "scale=4; $$CPU_TIME / $$GPU_TIME" | bc -l); \
+		LC_NUMERIC=C printf "Ускорение на GPU: %.2f раз\n" $$RATIO; \
+	else \
+		echo "Не удалось извлечь время выполнения"; \
+	fi

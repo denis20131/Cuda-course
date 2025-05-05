@@ -80,7 +80,7 @@ void initialize_data(real* h_A, real* h_B, int L) {
     }
 }
 
-void run_on_gpu(int dev, real* d_A, real* d_B, float* d_eps, int L,int MAX_IT) {
+void run_on_gpu(int dev, real* d_A, real* d_B, float* d_eps, int L,int MAX_IT,const float MAXEPS) {
     cudaSetDevice(dev);
     
     int z_size = (L-2 + MAX_GPUS - 1) / MAX_GPUS;
@@ -109,7 +109,10 @@ void run_on_gpu(int dev, real* d_A, real* d_B, float* d_eps, int L,int MAX_IT) {
         
         float eps;
         cudaMemcpy(&eps, d_eps, sizeof(float), cudaMemcpyDeviceToHost);
+	if (iter==0) continue;
         printf("GPU %d Iter %2d EPS = %.3e\n", dev, iter+1, eps);
+        printf("GPU %d Iter %2d EPS = %.3e\n", dev, iter+1, eps);
+        if (eps < MAXEPS) break;
     }
 
     // Выводим информацию о памяти после выполнения
@@ -122,7 +125,7 @@ int main(int argc, char** argv) {
         printf("Usage: %s <grid_size> <max_iterations> [use_float=1]\n", argv[0]);
         return 1;
     }
-
+    const float MAXEPS = 0;
     const int L = atoi(argv[1]);
     const int ITMAX = atoi(argv[2]);
     const size_t mem_size = L*L*L*sizeof(real);
@@ -171,7 +174,7 @@ int main(int argc, char** argv) {
     
     #pragma omp parallel for num_threads(MAX_GPUS)
     for (int dev = 0; dev < MAX_GPUS; dev++) {
-        run_on_gpu(dev, d_A[dev], d_B[dev], d_eps[dev], L,ITMAX);
+        run_on_gpu(dev, d_A[dev], d_B[dev], d_eps[dev], L,ITMAX,MAXEPS);
     }
     
     auto end = std::chrono::high_resolution_clock::now();
