@@ -5,8 +5,15 @@
 #include <assert.h>
 
 #define MAX_EPS 0.5
+
+#ifndef GRID_LEN
 #define GRID_LEN 900
+#endif
+
+#ifndef MAX_ITERS
 #define MAX_ITERS 20
+#endif
+
 #define BLOCK_X 32
 #define BLOCK_Y 4
 #define BLOCK_Z 4
