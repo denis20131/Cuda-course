@@ -10,10 +10,6 @@ CUDAFLAGS = -O3 -arch=sm_60 -std=c++11 -Wno-deprecated-gpu-targets
 EXEC_CPU = jacobi3d_cpu
 EXEC_GPU = jacobi3d_gpu
 
-# Стандартные параметры запуска
-L ?= 900
-ITMAX ?= 20
-
 # Временные файлы для хранения результатов
 CPU_TIME_FILE = cpu_time.txt
 GPU_TIME_FILE = gpu_time.txt
@@ -25,13 +21,13 @@ all: cpu gpu
 # CPU версия (OpenMP)
 cpu: $(EXEC_CPU)
 
-$(EXEC_CPU): main.cpp common.hpp
+$(EXEC_CPU): main.cpp 
 	$(CC) $(CFLAGS) -o $@ $<
 
 # GPU версия (CUDA)
 gpu: $(EXEC_GPU)
 
-$(EXEC_GPU): main.cu common.hpp
+$(EXEC_GPU): main.cu 
 	$(NVCC) $(CUDAFLAGS) -o $@ $<
 
 # Очистка
@@ -42,7 +38,7 @@ clean:
 run_cpu: $(EXEC_CPU)
 	@echo "Запуск CPU версии..."
 	@if [ -x "$(EXEC_CPU)" ]; then \
-		./$(EXEC_CPU) $(L) $(ITMAX) > $(CPU_TIME_FILE); \
+		./$(EXEC_CPU)  > $(CPU_TIME_FILE); \
 		echo "CPU версия завершена."; \
 	else \
 		echo "Ошибка: $(EXEC_CPU) не существует или не является исполняемым файлом."; \
@@ -53,7 +49,7 @@ run_cpu: $(EXEC_CPU)
 run_gpu: $(EXEC_GPU)
 	@echo "Запуск GPU версии..."
 	@if [ -x "$(EXEC_GPU)" ]; then \
-		./$(EXEC_GPU) $(L) $(ITMAX) > $(GPU_TIME_FILE); \
+		./$(EXEC_GPU)  > $(GPU_TIME_FILE); \
 		echo "GPU версия завершена."; \
 	else \
 		echo "Ошибка: $(EXEC_GPU) не существует или не является исполняемым файлом."; \

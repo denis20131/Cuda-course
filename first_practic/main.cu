@@ -1,187 +1,177 @@
 #include <stdio.h>
-#include "common.hpp"
-#include <stdlib.h>
+#include <math.h>
 #include <cuda_runtime.h>
-#include <omp.h>
-#include <chrono>
+#include <device_launch_parameters.h>
+#include <assert.h>
 
-#define BLOCK_SIZE 8
+#define MAX_EPS 0.5
 
+#ifndef GRID_LEN
+#define GRID_LEN 900
+#endif
 
-__device__ float atomicMaxFloat(float* address, float val) {
-    int* addr_as_int = (int*)address;
-    int old = *addr_as_int;
-    int assumed;
+#ifndef MAX_ITERS
+#define MAX_ITERS 20
+#endif
+
+#define BLOCK_X 32
+#define BLOCK_Y 4
+#define BLOCK_Z 4
+
+#define INDEX(x, y, z, N) (((z) * (N) * (N)) + ((y) * (N)) + (x))
+
+__device__ double atomicMaxDouble(double* address, double val) {
+    unsigned long long int* address_as_ull = (unsigned long long int*)address;
+    unsigned long long int old = *address_as_ull, assumed;
     do {
         assumed = old;
-        old = atomicCAS(addr_as_int, assumed,
-                      __float_as_int(fmaxf(val, __int_as_float(assumed))));
+        old = atomicCAS(address_as_ull, assumed,
+                        __double_as_longlong(fmax(val, __longlong_as_double(assumed))));
     } while (assumed != old);
-    return __int_as_float(old);
+    return __longlong_as_double(old);
 }
 
-__global__ void jacobi_kernel(real* A, real* B, float* d_eps, int L, int z_start, int z_end) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-    int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
-    int k = blockIdx.z * blockDim.z + threadIdx.z + z_start + 1;
+__global__ void calcEpsAndCompare(const double* oldGrid, const double* newGrid, double* diff, int N) {
 
-    if (i >= L-1 || j >= L-1 || k >= z_end) return;
+    int x = blockIdx.x * blockDim.x + threadIdx.x + 1;
+    int y = blockIdx.y * blockDim.y + threadIdx.y + 1;
+    int z = blockIdx.z * blockDim.z + threadIdx.z + 1;
+    
+    double threadMax = 0.0;
+    
+    if (x < N-1 && y < N-1 && z < N-1) {
+        int idx = INDEX(x, y, z, N);
+        threadMax = fabs(newGrid[idx] - oldGrid[idx]);
+    }
 
-    int idx = IDX(i,j,k,L);
-    real new_val = (A[IDX(i-1,j,k,L)] + A[IDX(i+1,j,k,L)] +
-                   A[IDX(i,j-1,k,L)] + A[IDX(i,j+1,k,L)] +
-                   A[IDX(i,j,k-1,L)] + A[IDX(i,j,k+1,L)]) * (1.0f/6.0f);
-    
-    float diff = fabsf(new_val - A[idx]);
-    
-    __shared__ float block_max;
-    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
-        block_max = 0.0f;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        threadMax = fmax(threadMax, __shfl_down_sync(0xFFFFFFFF, threadMax, offset));
+    }
+
+    __shared__ double blockMax[32];  
+    if (threadIdx.x % 32 == 0) {
+        blockMax[threadIdx.x / 32] = threadMax;
     }
     __syncthreads();
 
-    atomicMaxFloat(&block_max, diff);
-    __syncthreads();
-
-    if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
-        atomicMaxFloat(d_eps, block_max);
+    if (threadIdx.x < 32) {
+        double val = (threadIdx.x < blockDim.x * blockDim.y * blockDim.z / 32) ? 
+                    blockMax[threadIdx.x] : 0.0;
+        
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            val = fmax(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
+        }
+        
+        if (threadIdx.x == 0) {
+            atomicMaxDouble(diff, val);
+        }
     }
-    
-    B[idx] = new_val;
 }
 
-void print_memory_info(int dev) {
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, dev);
-    
-    size_t free, total;
-    cudaMemGetInfo(&free, &total);
-    
-    printf("GPU %d: %s\n", dev, prop.name);
-    printf("  Total memory: %.2f MB\n", total/1024.0/1024.0);
-    printf("  Free memory:  %.2f MB\n", free/1024.0/1024.0);
-    printf("  Used memory:  %.2f MB\n", (total-free)/1024.0/1024.0);
+__global__ void jacobiStep(const double* input, double* output, int N) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x + 1;
+    int y = blockIdx.y * blockDim.y + threadIdx.y + 1;
+    int z = blockIdx.z * blockDim.z + threadIdx.z + 1;
+
+    if (x < N - 1 && y < N - 1 && z < N - 1) {
+        int idx = INDEX(x, y, z, N);
+        output[idx] = (input[idx - N * N] + input[idx + N * N] +
+                       input[idx - N] + input[idx + N] +
+                       input[idx - 1] + input[idx + 1]) / 6.0;
+    }
 }
 
-void initialize_data(real* h_A, real* h_B, int L) {
-    #pragma omp parallel for collapse(3)
-    for (int i = 0; i < L; i++) {
-        for (int j = 0; j < L; j++) {
-            for (int k = 0; k < L; k++) {
-                int idx = IDX(i,j,k,L);
-                h_A[idx] = 0.0f;
-                if (i == 0 || j == 0 || k == 0 || i == L-1 || j == L-1 || k == L-1) {
-                    h_B[idx] = 0.0f;
-                } else {
-                    h_B[idx] = (float)(i + j + k);
-                }
+
+void fillGrids(double* A, double* B, int N) {
+    for (int z = 0; z < N; z++) {
+        for (int y = 0; y < N; y++) {
+            for (int x = 0; x < N; x++) {
+                int idx = INDEX(x, y, z, N);
+                A[idx] = 0;
+                B[idx] = (x == 0 || y == 0 || z == 0 || x == N - 1 || y == N - 1 || z == N - 1)
+                         ? 0 : 4 + x + y + z;
             }
         }
     }
 }
 
-void run_on_gpu(int dev, real* d_A, real* d_B, float* d_eps, int L,int MAX_IT,const float MAXEPS) {
-    cudaSetDevice(dev);
+int main() {
+    const int N = GRID_LEN;
+    const size_t gridSizeBytes = N * N * N * sizeof(double);
+    const size_t scalarSize = sizeof(double);
+
+    printf("Initializing CUDA...\n");
+
+    cudaDeviceProp devProp;
+    cudaGetDeviceProperties(&devProp, 0);
+    printf("Device: %s | Compute Capability: %d.%d\n", devProp.name, devProp.major, devProp.minor);
+
+    size_t freeMem, totalMem;
+    cudaMemGetInfo(&freeMem, &totalMem);
+    printf("Memory: %.2f GB total | %.2f GB free\n", totalMem / 1e9, freeMem / 1e9);
+    printf("Grid: %d x %d x %d | Memory per array: %.2f MB\n", N, N, N, gridSizeBytes / (1024.0 * 1024.0));
+
+    double *hostOld = (double*)malloc(gridSizeBytes);
+    double *hostNew = (double*)malloc(gridSizeBytes);
+    fillGrids(hostOld, hostNew, N);
+
+    double *devOld, *devNew, *devDiff;
+    cudaMalloc(&devOld, gridSizeBytes);
+    cudaMalloc(&devNew, gridSizeBytes);
+    cudaMalloc(&devDiff, scalarSize);
+
+    cudaMemcpy(devOld, hostOld, gridSizeBytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(devNew, hostNew, gridSizeBytes, cudaMemcpyHostToDevice);
+
+    dim3 blockDim(BLOCK_X, BLOCK_Y, BLOCK_Z);
+    dim3 gridDim((N + BLOCK_X - 1) / BLOCK_X,
+                 (N + BLOCK_Y - 1) / BLOCK_Y,
+                 (N + BLOCK_Z - 1) / BLOCK_Z);
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+
+    double* devA = devOld;
+    double* devB = devNew;
     
-    int z_size = (L-2 + MAX_GPUS - 1) / MAX_GPUS;
-    int z_start = dev * z_size;
-    int z_end = min(z_start + z_size, L-2);
+    for (int iter = 1; iter <= MAX_ITERS; iter++) {
+        double zero = 0.0;
+        cudaMemcpy(devDiff, &zero, sizeof(double), cudaMemcpyHostToDevice);
     
-    dim3 block(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
-    dim3 grid((L-2 + block.x-1)/block.x,
-              (L-2 + block.y-1)/block.y,
-              (z_end - z_start + block.z-1)/block.z);
-
-    printf("\nMemory usage before computation (GPU %d):\n", dev);
-    print_memory_info(dev);
-
-    for (int iter = 0; iter < MAX_IT; iter++) {
-        float zero = 0.0f;
-        cudaMemcpy(d_eps, &zero, sizeof(float), cudaMemcpyHostToDevice);
-        
-        jacobi_kernel<<<grid, block>>>(d_A, d_B, d_eps, L, z_start, z_end);
-        cudaDeviceSynchronize();
-        
-        real* temp = d_A;
-        d_A = d_B;
-        d_B = temp;
-        
-        float eps;
-        cudaMemcpy(&eps, d_eps, sizeof(float), cudaMemcpyDeviceToHost);
-	if (iter==0) continue;
-        printf("GPU %d Iter %2d EPS = %.3e\n", dev, iter+1, eps);
-        if (eps < MAXEPS) break;
-    }
-
-    printf("\nMemory usage after computation (GPU %d):\n", dev);
-    print_memory_info(dev);
-}
-
-int main(int argc, char** argv) {
-    if (argc < 3) {
-        printf("Usage: %s <grid_size> <max_iterations> [use_float=1]\n", argv[0]);
-        return 1;
-    }
-    const float MAXEPS = 0;
-    const int L = atoi(argv[1]);
-    const int ITMAX = atoi(argv[2]);
-    const size_t mem_size = L*L*L*sizeof(real);
-    const size_t eps_size = sizeof(float);
+        calcEpsAndCompare<<<gridDim, blockDim>>>(devA, devB, devDiff, N);
+        jacobiStep<<<gridDim, blockDim>>>(devB, devA, N);
     
-    printf("Problem size: %dx%dx%d\n", L, L, L);
-    printf("Memory per array: %.2f MB\n", mem_size/1024.0/1024.0);
-    printf("Total GPU memory required: %.2f MB (per GPU)\n", 
-          (2*mem_size + eps_size)/1024.0/1024.0);
-
-    int num_devices;
-    cudaGetDeviceCount(&num_devices);
-    if (num_devices < MAX_GPUS) {
-        printf("Error: Need at least %d GPUs (found %d)\n", MAX_GPUS, num_devices);
-        return 1;
-    }
-
-    for (int dev = 0; dev < MAX_GPUS; dev++) {
-        cudaSetDevice(dev);
-        printf("\nGPU %d properties:\n", dev);
-        print_memory_info(dev);
-    }
-
-    real *h_A = (real*)malloc(mem_size);
-    real *h_B = (real*)malloc(mem_size);
-    initialize_data(h_A, h_B, L);
-
-    real *d_A[MAX_GPUS], *d_B[MAX_GPUS];
-    float *d_eps[MAX_GPUS];
+        double maxDiff = 0.0;
+        cudaMemcpy(&maxDiff, devDiff, sizeof(double), cudaMemcpyDeviceToHost);
     
-    for (int dev = 0; dev < MAX_GPUS; dev++) {
-        cudaSetDevice(dev);
-        cudaMalloc(&d_A[dev], mem_size);
-        cudaMalloc(&d_B[dev], mem_size);
-        cudaMalloc(&d_eps[dev], eps_size);
-        
-        cudaMemcpy(d_A[dev], h_A, mem_size, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_B[dev], h_B, mem_size, cudaMemcpyHostToDevice);
+        printf("Iter %3d | Max Eps = %.7E\n", iter, maxDiff);
+        if (maxDiff < MAX_EPS) break;
+    
+        double* temp = devA;
+        devA = devB;
+        devB = temp;
     }
 
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    #pragma omp parallel for num_threads(MAX_GPUS)
-    for (int dev = 0; dev < MAX_GPUS; dev++) {
-        run_on_gpu(dev, d_A[dev], d_B[dev], d_eps[dev], L,ITMAX,MAXEPS);
-    }
-    
-    auto end = std::chrono::high_resolution_clock::now();
-    double time = std::chrono::duration<double>(end-start).count();
-    printf("\nTotal computation time: %.3f seconds\n", time);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
 
-    free(h_A);
-    free(h_B);
-    for (int dev = 0; dev < MAX_GPUS; dev++) {
-        cudaSetDevice(dev);
-        cudaFree(d_A[dev]);
-        cudaFree(d_B[dev]);
-        cudaFree(d_eps[dev]);
-    }
+    float timeMs = 0.0f;
+    cudaEventElapsedTime(&timeMs, start, stop);
+
+    printf("\n=== Jacobi 3D Report ===\n");
+    printf("Grid Size: %d^3\n", N);
+    printf("Max Iterations: %d\n", MAX_ITERS);
+    printf("Elapsed Time: %.3f sec\n", timeMs / 1000.0f);
+    printf("Iterations/sec: %.2f\n", MAX_ITERS / (timeMs / 1000.0f));
+    printf("Memory Used: %.2f MB\n", (2 * gridSizeBytes + scalarSize) / (1024.0 * 1024.0));
+
+    cudaFree(devOld);
+    cudaFree(devNew);
+    cudaFree(devDiff);
+    free(hostOld);
+    free(hostNew);
 
     return 0;
 }
