@@ -62,16 +62,25 @@ run: run_cpu run_gpu
 	@echo "Сравнение производительности:"
 	@echo "----------------------------"
 	@echo "CPU результаты:"
-	@cat $(CPU_TIME_FILE)
+	@[ -f $(CPU_TIME_FILE) ] && cat $(CPU_TIME_FILE) || echo "CPU результаты недоступны"
 	@echo ""
 	@echo "GPU результаты:"
-	@cat $(GPU_TIME_FILE)
+	@[ -f $(GPU_TIME_FILE) ] && cat $(GPU_TIME_FILE) || echo "GPU результаты недоступны"
 	@echo ""
-	@CPU_TIME=$$(grep 'Time in seconds' $(CPU_TIME_FILE) | awk '{print $$5}'); \
-	GPU_TIME=$$(grep 'Total computation time' $(GPU_TIME_FILE) | awk '{print $$4}'); \
-	if [ -n "$$CPU_TIME" ] && [ -n "$$GPU_TIME" ]; then \
-		RATIO=$$(echo "scale=4; $$CPU_TIME / $$GPU_TIME" | bc -l); \
-		LC_NUMERIC=C printf "Ускорение на GPU: %.2f раз\n" $$RATIO; \
+	@if [ -f $(CPU_TIME_FILE) ] && [ -f $(GPU_TIME_FILE) ]; then \
+		CPU_TIME=$$(grep 'Time in seconds' $(CPU_TIME_FILE) | grep -oE '[0-9]+\.[0-9]+'); \
+		GPU_TIME=$$(grep 'Elapsed Time' $(GPU_TIME_FILE) | grep -oE '[0-9]+\.[0-9]+'); \
+		if [ -n "$$CPU_TIME" ] && [ -n "$$GPU_TIME" ] && [ "$$GPU_TIME" != "0" ]; then \
+			RATIO=$$(LC_ALL=C echo "scale=2; $$CPU_TIME / $$GPU_TIME" | bc -l); \
+			LC_ALL=C printf "Ускорение на GPU: в %.2f раз\n" $$RATIO; \
+			LC_ALL=C printf "CPU время: %.2f сек | GPU время: %.2f сек\n" $$CPU_TIME $$GPU_TIME; \
+		else \
+			echo "Не удалось извлечь корректное время выполнения"; \
+			[ -z "$$CPU_TIME" ] && echo "Не найдено CPU время"; \
+			[ -z "$$GPU_TIME" ] && echo "Не найдено GPU время"; \
+		fi \
 	else \
-		echo "Не удалось извлечь время выполнения"; \
+		echo "Файлы результатов не найдены"; \
+		[ ! -f $(CPU_TIME_FILE) ] && echo "Отсутствует $(CPU_TIME_FILE)"; \
+		[ ! -f $(GPU_TIME_FILE) ] && echo "Отсутствует $(GPU_TIME_FILE)"; \
 	fi

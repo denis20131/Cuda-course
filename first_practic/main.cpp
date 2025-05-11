@@ -16,13 +16,8 @@ typedef double real;
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 int main(int argc, char** argv) {
-    if (argc < 3) {
-        printf("Usage: %s L ITMAX\n", argv[0]);
-        return 1;
-    }
-
-    const int L = atoi(argv[1]);          
-    const int ITMAX = atoi(argv[2]);    
+    const int L = 900;          
+    const int ITMAX = 20;    
     double MAXEPS = 0.5f;
 
     std::vector<real> A(L * L * L, 0), B(L * L * L, 0);
