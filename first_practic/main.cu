@@ -20,6 +20,14 @@
 
 #define INDEX(x, y, z, N) (((z) * (N) * (N)) + ((y) * (N)) + (x))
 
+#define cudaCheck(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort = true) {
+    if (code != cudaSuccess) {
+        fprintf(stderr, "CUDA Error: %s at %s:%d\n", cudaGetErrorString(code), file, line);
+        if (abort) exit(code);
+    }
+}
+
 __device__ double atomicMaxDouble(double* address, double val) {
     unsigned long long int* address_as_ull = (unsigned long long int*)address;
     unsigned long long int old = *address_as_ull, assumed;
@@ -32,14 +40,13 @@ __device__ double atomicMaxDouble(double* address, double val) {
 }
 
 __global__ void calcEpsAndCompare(const double* oldGrid, const double* newGrid, double* diff, int N) {
-
     int x = blockIdx.x * blockDim.x + threadIdx.x + 1;
     int y = blockIdx.y * blockDim.y + threadIdx.y + 1;
     int z = blockIdx.z * blockDim.z + threadIdx.z + 1;
-    
+
     double threadMax = 0.0;
-    
-    if (x < N-1 && y < N-1 && z < N-1) {
+
+    if (x < N - 1 && y < N - 1 && z < N - 1) {
         int idx = INDEX(x, y, z, N);
         threadMax = fabs(newGrid[idx] - oldGrid[idx]);
     }
@@ -48,20 +55,21 @@ __global__ void calcEpsAndCompare(const double* oldGrid, const double* newGrid, 
         threadMax = fmax(threadMax, __shfl_down_sync(0xFFFFFFFF, threadMax, offset));
     }
 
-    __shared__ double blockMax[32];  
+    __shared__ double blockMax[32];
     if (threadIdx.x % 32 == 0) {
         blockMax[threadIdx.x / 32] = threadMax;
     }
     __syncthreads();
 
     if (threadIdx.x < 32) {
-        double val = (threadIdx.x < blockDim.x * blockDim.y * blockDim.z / 32) ? 
-                    blockMax[threadIdx.x] : 0.0;
-        
+        double val = (threadIdx.x < blockDim.x * blockDim.y * blockDim.z / 32)
+            ? blockMax[threadIdx.x]
+            : 0.0;
+
         for (int offset = 16; offset > 0; offset >>= 1) {
             val = fmax(val, __shfl_down_sync(0xFFFFFFFF, val, offset));
         }
-        
+
         if (threadIdx.x == 0) {
             atomicMaxDouble(diff, val);
         }
@@ -80,7 +88,6 @@ __global__ void jacobiStep(const double* input, double* output, int N) {
                        input[idx - 1] + input[idx + 1]) / 6.0;
     }
 }
-
 
 void fillGrids(double* A, double* B, int N) {
     for (int z = 0; z < N; z++) {
@@ -103,11 +110,11 @@ int main() {
     printf("Initializing CUDA...\n");
 
     cudaDeviceProp devProp;
-    cudaGetDeviceProperties(&devProp, 0);
+    cudaCheck(cudaGetDeviceProperties(&devProp, 0));
     printf("Device: %s | Compute Capability: %d.%d\n", devProp.name, devProp.major, devProp.minor);
 
     size_t freeMem, totalMem;
-    cudaMemGetInfo(&freeMem, &totalMem);
+    cudaCheck(cudaMemGetInfo(&freeMem, &totalMem));
     printf("Memory: %.2f GB total | %.2f GB free\n", totalMem / 1e9, freeMem / 1e9);
     printf("Grid: %d x %d x %d | Memory per array: %.2f MB\n", N, N, N, gridSizeBytes / (1024.0 * 1024.0));
 
@@ -116,12 +123,12 @@ int main() {
     fillGrids(hostOld, hostNew, N);
 
     double *devOld, *devNew, *devDiff;
-    cudaMalloc(&devOld, gridSizeBytes);
-    cudaMalloc(&devNew, gridSizeBytes);
-    cudaMalloc(&devDiff, scalarSize);
+    cudaCheck(cudaMalloc(&devOld, gridSizeBytes));
+    cudaCheck(cudaMalloc(&devNew, gridSizeBytes));
+    cudaCheck(cudaMalloc(&devDiff, scalarSize));
 
-    cudaMemcpy(devOld, hostOld, gridSizeBytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(devNew, hostNew, gridSizeBytes, cudaMemcpyHostToDevice);
+    cudaCheck(cudaMemcpy(devOld, hostOld, gridSizeBytes, cudaMemcpyHostToDevice));
+    cudaCheck(cudaMemcpy(devNew, hostNew, gridSizeBytes, cudaMemcpyHostToDevice));
 
     dim3 blockDim(BLOCK_X, BLOCK_Y, BLOCK_Z);
     dim3 gridDim((N + BLOCK_X - 1) / BLOCK_X,
@@ -129,36 +136,39 @@ int main() {
                  (N + BLOCK_Z - 1) / BLOCK_Z);
 
     cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start);
+    cudaCheck(cudaEventCreate(&start));
+    cudaCheck(cudaEventCreate(&stop));
+    cudaCheck(cudaEventRecord(start));
 
     double* devA = devOld;
     double* devB = devNew;
-    
+
     for (int iter = 1; iter <= MAX_ITERS; iter++) {
         double zero = 0.0;
-        cudaMemcpy(devDiff, &zero, sizeof(double), cudaMemcpyHostToDevice);
-    
+        cudaCheck(cudaMemcpy(devDiff, &zero, sizeof(double), cudaMemcpyHostToDevice));
+
         calcEpsAndCompare<<<gridDim, blockDim>>>(devA, devB, devDiff, N);
+        cudaCheck(cudaGetLastError());
+
         jacobiStep<<<gridDim, blockDim>>>(devB, devA, N);
-    
+        cudaCheck(cudaGetLastError());
+
         double maxDiff = 0.0;
-        cudaMemcpy(&maxDiff, devDiff, sizeof(double), cudaMemcpyDeviceToHost);
-    
+        cudaCheck(cudaMemcpy(&maxDiff, devDiff, sizeof(double), cudaMemcpyDeviceToHost));
+
         printf("Iter %3d | Max Eps = %.7E\n", iter, maxDiff);
         if (maxDiff < MAX_EPS) break;
-    
+
         double* temp = devA;
         devA = devB;
         devB = temp;
     }
 
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
+    cudaCheck(cudaEventRecord(stop));
+    cudaCheck(cudaEventSynchronize(stop));
 
     float timeMs = 0.0f;
-    cudaEventElapsedTime(&timeMs, start, stop);
+    cudaCheck(cudaEventElapsedTime(&timeMs, start, stop));
 
     printf("\n=== Jacobi 3D Report ===\n");
     printf("Grid Size: %d^3\n", N);
@@ -167,9 +177,9 @@ int main() {
     printf("Iterations/sec: %.2f\n", MAX_ITERS / (timeMs / 1000.0f));
     printf("Memory Used: %.2f MB\n", (2 * gridSizeBytes + scalarSize) / (1024.0 * 1024.0));
 
-    cudaFree(devOld);
-    cudaFree(devNew);
-    cudaFree(devDiff);
+    cudaCheck(cudaFree(devOld));
+    cudaCheck(cudaFree(devNew));
+    cudaCheck(cudaFree(devDiff));
     free(hostOld);
     free(hostNew);
 
