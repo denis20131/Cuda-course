@@ -16,7 +16,7 @@ typedef double real;
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 int main(int argc, char** argv) {
-    const int L = 900;          
+    const int L = 100;          
     const int ITMAX = 20;    
     double MAXEPS = 0.5f;
 
