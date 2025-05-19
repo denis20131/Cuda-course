@@ -69,7 +69,7 @@ run: run_cpu run_gpu
 	@echo ""
 	@if [ -f $(CPU_TIME_FILE) ] && [ -f $(GPU_TIME_FILE) ]; then \
 		CPU_TIME=$$(grep 'Time in seconds' $(CPU_TIME_FILE) | grep -oE '[0-9]+\.[0-9]+'); \
-		GPU_TIME=$$(grep 'Elapsed Time' $(GPU_TIME_FILE) | grep -oE '[0-9]+\.[0-9]+'); \
+		GPU_TIME=$$(grep 'Time in seconds' $(GPU_TIME_FILE) | grep -oE '[0-9]+\.[0-9]+'); \
 		if [ -n "$$CPU_TIME" ] && [ -n "$$GPU_TIME" ] && [ "$$GPU_TIME" != "0" ]; then \
 			RATIO=$$(LC_ALL=C echo "scale=2; $$CPU_TIME / $$GPU_TIME" | bc -l); \
 			LC_ALL=C printf "Ускорение на GPU: в %.2f раз\n" $$RATIO; \
