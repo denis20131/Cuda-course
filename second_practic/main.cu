@@ -184,8 +184,7 @@ int main() {
         process_y_axis<<<y_grid, def_block>>>(main_vol.data, main_vol.dim_x, main_vol.dim_y, main_vol.dim_z);
         rearrange_data<<<rearrange_grid, def_block>>>(main_vol.data, temp_vol.data, main_vol.dim_x, main_vol.dim_y, main_vol.dim_z);
         process_z_axis<<<rearrange_grid, def_block,def_block.x * def_block.y * sizeof(double)>>>(temp_vol.data,temp_vol.dim_x, temp_vol.dim_y, temp_vol.dim_z, d_error);
-        rearrange_data<<<rearrange_grid, def_block>>>(temp_vol.data, main_vol.data, 
-                                                          temp_vol.dim_z, temp_vol.dim_x, temp_vol.dim_y);
+        rearrange_data<<<rearrange_grid, def_block>>>(temp_vol.data, main_vol.data, temp_vol.dim_z, temp_vol.dim_x, temp_vol.dim_y);
 
         cudaCheck(cudaMemcpy(&error, d_error, sizeof(double), cudaMemcpyDeviceToHost));
         printf("Iteration %4d, Error = " "%14.7E" "\n", iter, error);
