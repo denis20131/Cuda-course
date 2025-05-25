@@ -16,11 +16,6 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort =
     }
 }
 
-typedef struct {
-    double* data;
-    int dim_x, dim_y, dim_z;
-} Volume;
-
 __device__ double gpu_atomic_max(double* address, double val) {
     unsigned long long int* address_as_ull = (unsigned long long int*)address;
     unsigned long long int old = *address_as_ull, assumed;
@@ -31,37 +26,6 @@ __device__ double gpu_atomic_max(double* address, double val) {
         old = atomicCAS(address_as_ull, assumed, __double_as_longlong(val));
     } while (assumed != old);
     return __longlong_as_double(old);
-}
-
-void setup_boundaries(double* h_data, int dim_x, int dim_y, int dim_z) {
-    for (int x = 0; x < dim_x; x++) {
-        for (int y = 0; y < dim_y; y++) {
-            for (int z = 0; z < dim_z; z++) {
-                int idx = x*dim_y*dim_z + y*dim_z + z;
-                if (x == 0 || x == dim_x-1 || y == 0 || y == dim_y-1 || z == 0 || z == dim_z-1) {
-                    h_data[idx] = 10.0 * (x/(double)(dim_x-1) + 
-                                        y/(double)(dim_y-1) + 
-                                        z/(double)(dim_z-1));
-                } else {
-                    h_data[idx] = 0.0;
-                }
-            }
-        }
-    }
-}
-
-Volume create_volume(int x, int y, int z) {
-    Volume vol;
-    vol.dim_x = x;
-    vol.dim_y = y;
-    vol.dim_z = z;
-    size_t size = x * y * z * sizeof(double);
-    cudaCheck(cudaMalloc(&vol.data, size));
-    return vol;
-}
-
-void free_volume(Volume vol) {
-    cudaCheck(cudaFree(vol.data));
 }
 
 __global__ void process_x_axis(double* field, int size_x, int size_y, int size_z) {
@@ -88,84 +52,107 @@ __global__ void process_y_axis(double* field, int size_x, int size_y, int size_z
     }
 }
 
-__global__ void rearrange_data(double* src, double* dst, 
-                             int size_x, int size_y, int size_z) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (x < size_x && y < size_y) {
-        for (int z = 0; z < size_z; z++) {
-            dst[z*size_x*size_y + x*size_y + y] = src[x*size_y*size_z + y*size_z + z];
+__global__ void rearrange_data(double* a, double* b, int nx, int ny, int nz) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i < nx && j < ny) {
+        for (int k = 0; k < nz; k++) {
+            int idx_a = k * ny * nz + i * nz + j;
+            int idx_b = j * nx * ny + k * ny + i;
+            b[idx_b] = a[idx_a];
         }
     }
 }
 
-__global__ void process_z_axis(double* grid, int dimx, int dimy, int dimz,double* max_error_ptr) 
+__global__ void process_z_axis(double* grid, int dimx, int dimy, int dimz, double* max_error_ptr) 
 {
-int row = blockIdx.y * blockDim.y + threadIdx.y;
-int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-bool inside = (row > 0) & (row < dimx-1) & 
-(col > 0) & (col < dimy-1);
+    bool inside = (row > 0) & (row < dimx - 1) & 
+                  (col > 0) & (col < dimy - 1);
 
-double my_max_diff = 0.0;
+    double my_max_diff = 0.0;
 
-if (inside) {
-    for (int depth = 1; depth < dimz-1; depth++) {
+    if (inside) {
+        for (int depth = 1; depth < dimz - 1; depth++) {
+            int cell = depth * dimx * dimy + row * dimy + col;
+            int upper = cell - dimx * dimy;
+            int lower = cell + dimx * dimy;
 
-    int cell = depth*dimx*dimy + row*dimy + col;
-    int upper = cell - dimx*dimy;  
-    int lower = cell + dimx*dimy; 
+            double smoothed = 0.5 * (grid[upper] + grid[lower]);
+            double diff = fabs(grid[cell] - smoothed);
 
-    double smoothed = (grid[upper] + grid[lower]) * 0.5;
-
-    double diff = fabs(grid[cell] - smoothed);
-    my_max_diff = fmax(my_max_diff, diff);
-
-    grid[cell] = smoothed;
-    }
+            my_max_diff = fmax(my_max_diff, diff);
+            grid[cell] = smoothed;
+        }
     }
 
-__shared__ double error_shared[256];  
+    __shared__ double error_shared[256];  
 
-int tid = threadIdx.x + threadIdx.y * blockDim.x;
-error_shared[tid] = my_max_diff;
-__syncthreads();
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    error_shared[tid] = my_max_diff;
+    __syncthreads();
 
-for (int step = blockDim.x*blockDim.y/2; step > 0; step >>= 1) {
-if (tid < step) {
-error_shared[tid] = fmax(error_shared[tid], 
-       error_shared[tid + step]);
+    for (int step = blockDim.x * blockDim.y / 2; step > 0; step >>= 1) {
+        if (tid < step) {
+            error_shared[tid] = fmax(error_shared[tid], error_shared[tid + step]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        gpu_atomic_max(max_error_ptr, error_shared[0]); 
+    }
 }
-__syncthreads();
-}
 
-if (tid == 0) {
-    double* addr_as_ull = (double*)max_error_ptr;
-    double old = *addr_as_ull;
-    while (error_shared[0] > old) {
-    old = atomicCAS((unsigned long long*)addr_as_ull,
-    __double_as_longlong(old),
-    __double_as_longlong(error_shared[0]));
-    }
+void setup_boundaries(double* h_data, int dim_x, int dim_y, int dim_z) {
+    for (int x = 0; x < dim_x; x++) {
+        for (int y = 0; y < dim_y; y++) {
+            for (int z = 0; z < dim_z; z++) {
+                int idx = x*dim_y*dim_z + y*dim_z + z;
+                if (x == 0 || x == dim_x-1 || y == 0 || y == dim_y-1 || z == 0 || z == dim_z-1) {
+                    h_data[idx] = 10.0 * (x/(double)(dim_x-1) + 
+                                        y/(double)(dim_y-1) + 
+                                        z/(double)(dim_z-1));
+                } else {
+                    h_data[idx] = 0.0;
+                }
+            }
+        }
     }
 }
 
 dim3 calculate_grid(dim3 block_size, int dim1, int dim2) {
-    return dim3 (ceil(GRID_Y / (double)block_size.x), 
-    ceil(GRID_Z / (double)block_size.y));
+    return dim3 (ceil(GRID_Y / (double)block_size.x), ceil(GRID_Z / (double)block_size.y));
 }
 
 
-int main() {
-    const dim3 x_block(8, 8);
-    const dim3 y_block(8, 8);
-    const dim3 rearrange_block(8, 8);
-    const dim3 z_block(8 , 8);
+typedef struct {
+    double* data;
+    int dim_x, dim_y, dim_z;
+} Volume;
 
-    const dim3 x_grid = calculate_grid(x_block, GRID_Y, GRID_Z);
-    const dim3 y_grid = calculate_grid(y_block, GRID_X, GRID_Z);
-    const dim3 rearrange_grid = calculate_grid(rearrange_block, GRID_X, GRID_Y);
+Volume create_volume(int x, int y, int z) {
+    Volume vol;
+    vol.dim_x = x;
+    vol.dim_y = y;
+    vol.dim_z = z;
+    size_t size = x * y * z * sizeof(double);
+    cudaCheck(cudaMalloc(&vol.data, size));
+    return vol;
+}
+
+void free_volume(Volume vol) {
+    cudaCheck(cudaFree(vol.data));
+}
+
+int main() {
+    const dim3 def_block(16, 16);
+
+    const dim3 x_grid = calculate_grid(def_block, GRID_Y, GRID_Z);
+    const dim3 y_grid = calculate_grid(def_block, GRID_X, GRID_Z);
+    const dim3 rearrange_grid = calculate_grid(def_block, GRID_X, GRID_Y);
 
     cudaDeviceProp props;
     cudaCheck(cudaGetDeviceProperties(&props, 0));
@@ -184,7 +171,6 @@ int main() {
     double* d_error;
     cudaCheck(cudaMalloc(&d_error, sizeof(double)));
 
-
     cudaEvent_t start, stop;
     cudaCheck(cudaEventCreate(&start));
     cudaCheck(cudaEventCreate(&stop));
@@ -194,16 +180,15 @@ int main() {
         double error = 0.0;
         cudaCheck(cudaMemcpy(d_error, &error, sizeof(double), cudaMemcpyHostToDevice));
 
-        process_x_axis<<<x_grid, x_block>>>(main_vol.data, main_vol.dim_x, main_vol.dim_y, main_vol.dim_z);
-        process_y_axis<<<y_grid, y_block>>>(main_vol.data, main_vol.dim_x, main_vol.dim_y, main_vol.dim_z);
-        rearrange_data<<<rearrange_grid, rearrange_block>>>(main_vol.data, temp_vol.data, main_vol.dim_x, main_vol.dim_y, main_vol.dim_z);
-        process_z_axis<<<rearrange_grid, z_block,z_block.x * z_block.y * sizeof(double)>>>(temp_vol.data,temp_vol.dim_x, temp_vol.dim_y, temp_vol.dim_z, d_error);
-        rearrange_data<<<rearrange_grid, rearrange_block>>>(temp_vol.data, main_vol.data, 
+        process_x_axis<<<x_grid, def_block>>>(main_vol.data, main_vol.dim_x, main_vol.dim_y, main_vol.dim_z);
+        process_y_axis<<<y_grid, def_block>>>(main_vol.data, main_vol.dim_x, main_vol.dim_y, main_vol.dim_z);
+        rearrange_data<<<rearrange_grid, def_block>>>(main_vol.data, temp_vol.data, main_vol.dim_x, main_vol.dim_y, main_vol.dim_z);
+        process_z_axis<<<rearrange_grid, def_block,def_block.x * def_block.y * sizeof(double)>>>(temp_vol.data,temp_vol.dim_x, temp_vol.dim_y, temp_vol.dim_z, d_error);
+        rearrange_data<<<rearrange_grid, def_block>>>(temp_vol.data, main_vol.data, 
                                                           temp_vol.dim_z, temp_vol.dim_x, temp_vol.dim_y);
 
         cudaCheck(cudaMemcpy(&error, d_error, sizeof(double), cudaMemcpyDeviceToHost));
         printf("Iteration %4d, Error = " "%14.7E" "\n", iter, error);
-        
         if (error < CONVERGENCE_THRESHOLD) break;
     }
 
